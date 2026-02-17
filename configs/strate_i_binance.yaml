@@ -1,0 +1,46 @@
+codebook:
+  commitment_weight: 0.25
+  dead_threshold: 2
+  ema_decay: 0.99
+  eps: 1.0e-05
+  latent_dim: 64
+  num_codes: 1024
+data:
+  data_path: data/binance_1h_subset/
+  num_workers: 4
+  val_split: 0.2
+decoder:
+  hidden_channels: 128
+  kernel_size: 3
+  latent_dim: 64
+  n_layers: 4
+  out_channels: 5
+  patch_length: 16
+encoder:
+  dilation_base: 2
+  hidden_channels: 128
+  in_channels: 5
+  kernel_size: 3
+  latent_dim: 64
+  n_layers: 4
+loss:
+  commitment_beta: 0.25
+  huber_delta: 1.0
+  sdtw_alpha: 0.1
+  sdtw_gamma: 0.1
+patch:
+  n_channels: 5
+  patch_length: 16
+  stride: 16
+revin:
+  affine: false
+  eps: 1.0e-05
+training:
+  batch_size: 128
+  lr: 0.0003
+  max_epochs: 10
+  num_patches: 32
+  patience: 5
+  precision: bf16-mixed
+  warmup_epochs: 5
+  weight_decay: 0.01

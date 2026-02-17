@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "financial-ia"
+version = "0.1.0"
+description = "Financial IA - Topological Tokenizer (Strate I)"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.0",
+    "pytorch-lightning>=2.0",
+    "tslearn>=0.6",
+    "numpy",
+    "pandas",
+    "dacite",
+    "pyyaml",
+    "tensorboard",
+    "einops",
+    "gymnasium>=1.0",
+    "stable-baselines3>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
