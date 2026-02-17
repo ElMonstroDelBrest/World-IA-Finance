@@ -202,11 +202,24 @@ class TestLatentCryptoEnv:
     def test_delta_mu_in_observation(self, env):
         """delta_mu should be present and finite in observation."""
         obs, _ = env.reset(seed=42)
-        # delta_mu is at index d*3 + n_tgt*3 + 5 (0-based)
-        # For d_model=128: 128+128+128 + 24 + 5 = 413
-        delta_mu_idx = 128 + 128 + 128 + 24 + 5  # = 413
+        # delta_mu at: d*3 + n_tgt*3 + 5 = 384 + 24 + 5 = 413 (d_model=128)
+        delta_mu_idx = 128 * 3 + 8 * 3 + 5  # = 413
         delta_mu = obs[delta_mu_idx]
         assert np.isfinite(delta_mu)
+
+    def test_observation_changes_between_steps(self, env):
+        """Observation must change between steps (anti-Oracle check)."""
+        obs0, _ = env.reset(seed=42)
+        action = np.array([0.5], dtype=np.float32)
+        obs1, _, _, _, _ = env.step(action)
+        # With step-aware obs, future_mean_t, step_progress, realized_returns
+        # should all differ between step 0 and step 1
+        n_changed = np.sum(obs0 != obs1)
+        # At minimum: d_model (future_mean_t) + d_model (future_std_t)
+        # + 1 (step_progress) + 1 (realized_returns[0]) + 1 (position) + 1 (cum_pnl)
+        assert n_changed >= 4, (
+            f"Only {n_changed} dims changed between steps — observation is too static"
+        )
 
 
 # ---------------------------------------------------------------------------

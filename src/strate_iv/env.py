@@ -1,20 +1,25 @@
 """LatentCryptoEnv: Gymnasium environment for Strate IV RL training.
 
-The agent observes a vector composed of:
-  - h_x_pooled (d_model): JEPA context encoder mean-pool
-  - future_latent_mean (d_model): Mean of N future latents across N samples
-  - future_latent_std (d_model): Std of N future latents across N samples
-  - future_close_stats (N_tgt * 3): Per-target close return stats (mean/std/skew)
-  - revin_stds (5): RevIN std per channel (volatility regime)
-  - delta_mu (1): Macro trend — normalized mu variation between last context patches
-  - position (1): Current portfolio position a_{t-1}
-  - cumulative_pnl (1): Running PnL
+The agent observes a **step-aware** vector composed of:
+  - h_x_pooled (d_model): JEPA context encoder mean-pool (static per episode)
+  - future_mean_t (d_model): Mean of N future latents at current step t (**dynamic**)
+  - future_std_t (d_model): Std of N future latents at current step t (**dynamic**)
+  - close_stats (N_tgt * 3): Per-target close return stats (mean/std/skew, static)
+  - revin_stds (5): RevIN std per channel (volatility regime, static)
+  - delta_mu (1): Macro trend from context patches (static)
+  - step_progress (1): t / N_tgt — episode progress (**dynamic**)
+  - realized_returns (N_tgt): Close returns of the realized future, masked for
+    future steps (**dynamic** — fills in as the episode progresses)
+  - position (1): Current portfolio position a_{t-1} (**dynamic**)
+  - cumulative_pnl (1): Running PnL (**dynamic**)
 
-Observation dim = 3 * d_model + N_tgt * 3 + 5 + 3  (auto-detected from buffer).
+Observation dim = 3 * d_model + N_tgt * 4 + 5 + 4  (auto-detected from buffer).
 
 Action: Box([-1], [1]) — continuous position (-1=short, 0=flat, +1=long).
 
-Episode: N_tgt steps. At reset, one future is sampled as "realized" (domain randomization).
+Episode: N_tgt steps. At reset, one future is sampled as "realized" (domain
+randomization). The observation evolves at each step, giving the agent
+step-specific latent expectations and the realized market trajectory so far.
 """
 
 from __future__ import annotations
@@ -141,55 +146,84 @@ class LatentCryptoEnv(gym.Env):
 
     def _build_observation(self) -> np.ndarray:
         """Build the observation vector from current episode state."""
-        return self._build_observation_from(self._entry)
+        return self._build_observation_from(
+            self._entry, self._step_idx, self._realized_idx,
+            self._position, self._cumulative_pnl,
+        )
 
-    def _build_observation_from(self, entry: TrajectoryEntry) -> np.ndarray:
-        """Build observation vector from a given entry.
+    def _build_observation_from(
+        self,
+        entry: TrajectoryEntry,
+        step_idx: int = 0,
+        realized_idx: int = 0,
+        position: float = 0.0,
+        cum_pnl: float = 0.0,
+    ) -> np.ndarray:
+        """Build step-aware observation vector from a given entry.
 
         Components (concatenated):
-            h_x_pooled:     (d_model,) — JEPA context representation
-            future_mean:    (d_model,) — mean of N future latents, pooled over N_tgt
-            future_std:     (d_model,) — std of N future latents, pooled over N_tgt
-            close_stats:    (N_tgt * 3,) — per-target [mean, std, skew] of close returns
-            revin_stds:     (5,) — RevIN channel stds (volatility regime signal)
-            delta_mu:       (1,) — macro trend from context
-            position:       (1,) — current portfolio position
-            cumulative_pnl: (1,) — running PnL
+            h_x_pooled:       (d_model,) — JEPA context representation (static)
+            future_mean_t:    (d_model,) — mean of N future latents at step t (dynamic)
+            future_std_t:     (d_model,) — std of N future latents at step t (dynamic)
+            close_stats:      (N_tgt * 3,) — per-target [mean, std, skew] of close returns
+            revin_stds:       (5,) — RevIN channel stds (volatility regime)
+            delta_mu:         (1,) — macro trend from context
+            step_progress:    (1,) — t / N_tgt, episode progress (dynamic)
+            realized_returns: (N_tgt,) — realized close returns so far (dynamic)
+            position:         (1,) — current portfolio position (dynamic)
+            cumulative_pnl:   (1,) — running PnL (dynamic)
 
         Returns:
             (obs_dim,) float32 array with NaN/Inf replaced by 0.
         """
+        n_tgt = self.config.n_tgt
         future_latents = entry.future_latents.numpy()  # (N, N_tgt, d_model)
 
-        # 1. h_x_pooled (d_model)
+        # 1. h_x_pooled (d_model) — static per episode
         h_x_pooled = entry.h_x_pooled.numpy()  # (d_model,)
 
-        # 2. future_latent_mean — mean across N futures, mean-pool across N_tgt
-        future_mean = future_latents.mean(axis=0).mean(axis=0)  # (d_model,)
+        # 2. future_mean_t — mean across N futures at CURRENT step (dynamic)
+        latent_step = min(step_idx, n_tgt - 1)
+        future_mean_t = future_latents[:, latent_step, :].mean(axis=0)  # (d_model,)
 
-        # 3. future_latent_std — std across N futures, mean-pool across N_tgt
-        future_std = future_latents.std(axis=0).mean(axis=0)  # (d_model,)
+        # 3. future_std_t — std across N futures at CURRENT step (dynamic)
+        future_std_t = future_latents[:, latent_step, :].std(axis=0)  # (d_model,)
 
-        # 4. future_close_stats — per-target: mean, std, skew of close returns
+        # 4. close_stats — per-target: mean, std, skew of close returns (static)
         future_ohlcv = entry.future_ohlcv.numpy()
         close_stats = self._compute_close_stats(future_ohlcv)
 
-        # 5. revin_stds (5)
+        # 5. revin_stds (5) — volatility regime (static)
         revin_stds = entry.revin_stds.numpy().flatten()  # (5,)
 
-        # 6. delta_mu (1) — macro trend from context OHLCV
+        # 6. delta_mu (1) — macro trend (static)
         delta_mu = self._compute_delta_mu(entry, self.config.patch_len)
 
-        # 7. position (1)
-        position = np.array([self._position], dtype=np.float32)
+        # 7. step_progress (1) — episode progress (dynamic)
+        step_progress = np.array(
+            [step_idx / n_tgt], dtype=np.float32,
+        )
 
-        # 8. cumulative pnl (1)
-        cum_pnl = np.array([self._cumulative_pnl], dtype=np.float32)
+        # 8. realized_returns (N_tgt) — close returns of realized path so far (dynamic)
+        realized = entry.future_ohlcv[realized_idx].numpy()  # (N_tgt, patch_len, 5)
+        closes = realized[:, -1, 3]  # (N_tgt,) close at end of each patch
+        realized_returns = np.zeros(n_tgt, dtype=np.float32)
+        for s in range(min(step_idx, n_tgt - 1)):
+            realized_returns[s] = (
+                (closes[s + 1] - closes[s]) / (abs(closes[s]) + EPS)
+            )
+
+        # 9. position (1) — current portfolio position (dynamic)
+        pos = np.array([position], dtype=np.float32)
+
+        # 10. cumulative pnl (1) — running PnL (dynamic)
+        cpnl = np.array([cum_pnl], dtype=np.float32)
 
         obs = np.concatenate([
-            h_x_pooled, future_mean, future_std,
+            h_x_pooled, future_mean_t, future_std_t,
             close_stats, revin_stds, delta_mu,
-            position, cum_pnl,
+            step_progress, realized_returns,
+            pos, cpnl,
         ]).astype(np.float32)
 
         # Replace any NaN/Inf with 0
