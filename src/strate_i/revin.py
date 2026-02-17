@@ -1,3 +1,5 @@
+"""Reversible Instance Normalization (RevIN) for distribution shift handling."""
+
 import torch
 from torch import Tensor, nn
 

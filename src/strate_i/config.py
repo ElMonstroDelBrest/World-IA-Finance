@@ -1,3 +1,5 @@
+"""Configuration dataclasses for Strate I (Spherical VQ-VAE tokenizer)."""
+
 from __future__ import annotations
 
 import yaml

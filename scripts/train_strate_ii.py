@@ -7,7 +7,7 @@ Usage:
     # Synthetic data for development:
     python scripts/train_strate_ii.py --config configs/strate_ii.yaml --synthetic
 
-    # H100 God-Tier with torch.compile:
+    # H100 Production-Scale with torch.compile:
     python scripts/train_strate_ii.py --config configs/strate_ii.yaml --compile
 
     # Auto-resume from last checkpoint:

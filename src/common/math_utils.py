@@ -1,3 +1,5 @@
+"""Shared math utilities: L2 normalization and cosine similarity."""
+
 import torch
 from torch import Tensor
 

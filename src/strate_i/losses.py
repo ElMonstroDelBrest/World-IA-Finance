@@ -1,3 +1,5 @@
+"""Loss functions for Strate I: Huber reconstruction + Soft-DTW + VQ commitment."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

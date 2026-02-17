@@ -1,3 +1,5 @@
+"""TopologicalTokenizer — public facade wrapping RevIN + SphericalVQVAE."""
+
 import torch
 import torch.nn as nn
 from torch import Tensor

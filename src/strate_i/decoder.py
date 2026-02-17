@@ -1,3 +1,5 @@
+"""Convolutional decoder reconstructing OHLCV patches from latent codes."""
+
 from torch import Tensor, nn
 from torch.nn import functional as F
 

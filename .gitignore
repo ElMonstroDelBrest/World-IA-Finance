@@ -29,3 +29,18 @@ infra/.terraform/
 infra/tfplan
 infra/*.tfstate*
 infra/.terraform.lock.hcl
+
+# Lock files
+uv.lock
+
+# Drafts and reports
+EMAIL_DRAFT_LECUN.txt
+RAPPORT_*.md
+
+# Data
+data/binance_1h*/
+data/tokens/
+
+# Build artifacts
+.triton_cache/
+training_h100.log

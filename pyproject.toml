@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "financial-ia"
 version = "0.1.0"
 description = "Financial IA - Latent Market Intelligence (Strates I-IV)"
+authors = [{name = "Daniel"}]
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "torch>=2.0",

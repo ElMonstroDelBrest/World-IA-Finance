@@ -66,7 +66,3 @@ class PnLReward:
             tc_penalty=tc_penalty,
             log_return=log_ret,
         )
-
-
-# Backward-compatible alias
-AsymmetricReward = PnLReward

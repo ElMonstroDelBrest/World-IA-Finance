@@ -1,3 +1,5 @@
+"""Causal dilated convolutional encoder mapping patches to the unit sphere."""
+
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F

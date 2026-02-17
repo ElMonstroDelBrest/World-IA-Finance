@@ -1,3 +1,5 @@
+"""PyTorch Lightning training module for Strate I."""
+
 import pytorch_lightning as pl
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR

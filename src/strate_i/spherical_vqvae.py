@@ -1,3 +1,5 @@
+"""Spherical VQ-VAE combining encoder, codebook, and decoder."""
+
 import torch
 import torch.nn as nn
 from torch import Tensor

@@ -1,6 +1,6 @@
 #!/bin/bash
 ###############################################################################
-# Financial-IA — H100 God-Tier Training Launch Script
+# Financial-IA — H100 Production-Scale Training Launch Script
 #
 # Runs on: GCP a3-highgpu-1g (1× H100 80GB, 26 vCPUs, 234 GB RAM)
 # Deep Learning VM: PyTorch 2.7 + CUDA 12.8 + Ubuntu 24.04
@@ -38,7 +38,7 @@ for arg in "$@"; do
 done
 
 echo "============================================"
-echo " Financial-IA — H100 God-Tier Training"
+echo " Financial-IA — H100 Production-Scale Training"
 echo " Config: ${CONFIG}"
 echo " Smoke test: ${SMOKE_TEST}"
 echo " torch.compile: ${USE_COMPILE}"
@@ -174,10 +174,6 @@ if [ "$SMOKE_TEST" = true ]; then
     echo "============================================"
     exit 0
 fi
-
-# ---------------------------------------------------------------------------
-# 6. Full training
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # 6. Start GCS checkpoint sync (background loop)
