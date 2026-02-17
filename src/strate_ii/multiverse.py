@@ -138,6 +138,9 @@ class MultiverseGenerator:
     ) -> Tensor:
         """Convert denormalized log-return patches to OHLCV candles.
 
+        Flattens all patches into a single timeline and applies a global
+        cumprod so that prices are C0-continuous across patch boundaries.
+
         Args:
             patches_real: (N, B, N_tgt, patch_len, 5) denormalized log-returns.
             context_ohlcv: (B, T, 5) raw OHLCV context.
@@ -146,25 +149,32 @@ class MultiverseGenerator:
             (N, B, N_tgt, patch_len, 5) OHLCV candles with absolute prices.
         """
         N, B, N_tgt, patch_len, _ = patches_real.shape
+        T_total = N_tgt * patch_len
 
         # Last close price from context as anchor
         last_close = context_ohlcv[:, -1, 3]  # (B,)
-        last_close = last_close.reshape(1, B, 1, 1).expand(N, B, N_tgt, 1)  # (N, B, N_tgt, 1)
+        # (1, B, 1)
+        anchor = last_close.reshape(1, B, 1)
 
-        # OHLC channels (0-3): exp(log_returns) → price_ratios → cumprod
+        # OHLC channels (0-3): flatten patches into continuous timeline
         log_returns_ohlc = patches_real[..., :4]  # (N, B, N_tgt, patch_len, 4)
-        price_ratios = torch.exp(log_returns_ohlc)
-        # Cumulative product along patch_len dimension
-        cum_ratios = torch.cumprod(price_ratios, dim=3)  # (N, B, N_tgt, patch_len, 4)
-        # Multiply by last_close to get absolute prices
-        prices = last_close.unsqueeze(-1) * cum_ratios  # (N, B, N_tgt, patch_len, 4)
+        # Flatten: (N, B, N_tgt * patch_len, 4)
+        lr_flat = log_returns_ohlc.reshape(N, B, T_total, 4)
+        price_ratios = torch.exp(lr_flat)
+
+        # Global cumprod across entire timeline (dim=2) — no discontinuities
+        cum_ratios = torch.cumprod(price_ratios, dim=2)  # (N, B, T_total, 4)
+
+        # Multiply by anchor to get absolute prices
+        prices_flat = anchor.unsqueeze(-1) * cum_ratios  # (N, B, T_total, 4)
+
+        # Reshape back to (N, B, N_tgt, patch_len, 4)
+        prices = prices_flat.reshape(N, B, N_tgt, patch_len, 4)
 
         # Volume channel (4): inverse of log1p normalization
-        # patches_real[..., 4] are denormalized log-return-style values for volume
-        # Reconstruct as: mean_volume * expm1(log_return_vol)
         mean_volume = context_ohlcv[:, :, 4].mean(dim=1)  # (B,)
         mean_volume = mean_volume.reshape(1, B, 1, 1).expand(N, B, N_tgt, patch_len)
-        volume = mean_volume * torch.expm1(patches_real[..., 4]).clamp(min=0)  # (N, B, N_tgt, patch_len)
+        volume = mean_volume * torch.expm1(patches_real[..., 4]).clamp(min=0)
 
-        ohlcv = torch.cat([prices, volume.unsqueeze(-1)], dim=-1)  # (N, B, N_tgt, patch_len, 5)
+        ohlcv = torch.cat([prices, volume.unsqueeze(-1)], dim=-1)
         return ohlcv

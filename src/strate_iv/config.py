@@ -7,9 +7,9 @@ from dacite import from_dict, Config as DaciteConfig
 
 @dataclass(frozen=True)
 class EnvConfig:
-    obs_dim: int = 415
+    obs_dim: int = 416
     n_tgt: int = 8
-    tc_rate: float = 0.001
+    tc_rate: float = 0.0005
     patch_len: int = 16
 
 

@@ -170,7 +170,7 @@ def generate_from_checkpoints(args):
 
 
 def _plot_futures(result: dict, save_path: Path, title: str = "Multiverse Futures"):
-    """Plot OHLCV fan chart showing N future scenarios."""
+    """Plot OHLCV fan chart showing N future scenarios with patch boundaries."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -187,7 +187,7 @@ def _plot_futures(result: dict, save_path: Path, title: str = "Multiverse Future
     # Shape: (N, B, N_tgt * patch_len)
     close_prices = ohlcv[..., 3].reshape(N, B, N_tgt * patch_len)
 
-    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+    fig, ax = plt.subplots(1, 1, figsize=(14, 6))
 
     # Plot each sample's close price trajectory for batch 0
     time = np.arange(N_tgt * patch_len)
@@ -205,7 +205,13 @@ def _plot_futures(result: dict, save_path: Path, title: str = "Multiverse Future
     q95 = close_prices[:, 0].quantile(0.95, dim=0).cpu().numpy()
     ax.fill_between(time, q05, q95, alpha=0.15, color="steelblue", label="5-95% CI")
 
-    ax.set_title(f"{title} — {N} Future Scenarios")
+    # Draw patch boundaries to visually verify C0 continuity
+    for p in range(1, N_tgt):
+        ax.axvline(x=p * patch_len, color="orange", linewidth=1, linestyle="--", alpha=0.6)
+    # Add a single legend entry for patch boundaries
+    ax.axvline(x=patch_len, color="orange", linewidth=0, label="Patch boundary")
+
+    ax.set_title(f"{title} — {N} Future Scenarios (patch_len={patch_len})")
     ax.set_xlabel("Time steps (within predicted patches)")
     ax.set_ylabel("Close Price")
     ax.legend()

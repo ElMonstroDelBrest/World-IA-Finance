@@ -1,7 +1,7 @@
 env:
-  obs_dim: 415
+  obs_dim: 416
   n_tgt: 8
-  tc_rate: 0.001
+  tc_rate: 0.0005
   patch_len: 16
 
 buffer:

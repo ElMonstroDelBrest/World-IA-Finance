@@ -1,11 +1,12 @@
 """LatentCryptoEnv: Gymnasium environment for Strate IV RL training.
 
-The agent observes a 415-dim vector composed of:
+The agent observes a 416-dim vector composed of:
   - h_x_pooled (128): JEPA context encoder mean-pool
   - future_latent_mean (128): Mean of N future latents across N samples
   - future_latent_std (128): Std of N future latents across N samples
   - future_close_stats (24): Per-target close return stats (8 targets * 3: mean/std/skew)
   - revin_stds (5): RevIN std per channel (volatility regime)
+  - delta_mu (1): Macro trend — normalized mu variation between last context patches
   - position (1): Current portfolio position a_{t-1}
   - cumulative_pnl (1): Running PnL
 
@@ -95,15 +96,11 @@ class LatentCryptoEnv(gym.Env):
             # Last step: use last candle close of current patch
             close_next = close_current
 
-        # RevIN std for Close channel (index 3)
-        sigma_close = self._entry.revin_stds[0, 3].item()
-
         reward, info = self.reward_fn.compute(
             action=action_val,
             prev_action=self._position,
             close_current=close_current,
             close_next=close_next,
-            sigma_close=sigma_close,
         )
 
         self._position = action_val
@@ -118,7 +115,7 @@ class LatentCryptoEnv(gym.Env):
         step_info = {
             "raw_pnl": info.raw_pnl,
             "tc_penalty": info.tc_penalty,
-            "sigma_close": info.sigma_close,
+            "log_return": info.log_return,
             "position": self._position,
             "cumulative_pnl": self._cumulative_pnl,
             "step": self._step_idx,
@@ -127,7 +124,7 @@ class LatentCryptoEnv(gym.Env):
         return obs, reward, terminated, truncated, step_info
 
     def _build_observation(self) -> np.ndarray:
-        """Build the 415-dim observation vector."""
+        """Build the 416-dim observation vector."""
         entry = self._entry
         future_latents = entry.future_latents.numpy()  # (N, N_tgt, d_model)
         N, N_tgt, d_model = future_latents.shape
@@ -149,15 +146,18 @@ class LatentCryptoEnv(gym.Env):
         # 5. revin_stds (5)
         revin_stds = entry.revin_stds.numpy().flatten()  # (5,)
 
-        # 6. position (1)
+        # 6. delta_mu (1) — macro trend from context OHLCV
+        delta_mu = self._compute_delta_mu(entry)  # (1,)
+
+        # 7. position (1)
         position = np.array([self._position], dtype=np.float32)
 
-        # 7. cumulative pnl (1)
+        # 8. cumulative pnl (1)
         cum_pnl = np.array([self._cumulative_pnl], dtype=np.float32)
 
         obs = np.concatenate([
             h_x_pooled, future_mean, future_std,
-            close_stats, revin_stds,
+            close_stats, revin_stds, delta_mu,
             position, cum_pnl,
         ]).astype(np.float32)
 
@@ -165,6 +165,36 @@ class LatentCryptoEnv(gym.Env):
         obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
 
         return obs
+
+    @staticmethod
+    def _compute_delta_mu(entry: TrajectoryEntry) -> np.ndarray:
+        """Compute macro trend signal from context OHLCV.
+
+        Computes the normalized difference between the mean close of the
+        last 2 patches vs the previous 2 patches in the context window.
+        This gives the agent the "slope" of the global trend.
+
+        Returns:
+            (1,) array with normalized delta_mu.
+        """
+        context = entry.context_ohlcv.numpy()  # (T, 5)
+        close = context[:, 3]  # (T,)
+        T = len(close)
+        patch_len = 16
+
+        if T < 4 * patch_len:
+            return np.zeros(1, dtype=np.float32)
+
+        # Mean close of last 2 patches
+        recent = close[-(2 * patch_len):].mean()
+        # Mean close of the 2 patches before that
+        earlier = close[-(4 * patch_len):-(2 * patch_len)].mean()
+
+        # Normalize by overall std to keep it O(1)
+        sigma = close.std() + 1e-8
+        delta_mu = (recent - earlier) / sigma
+
+        return np.array([delta_mu], dtype=np.float32)
 
     @staticmethod
     def _compute_close_stats(future_ohlcv: np.ndarray) -> np.ndarray:
@@ -182,21 +212,18 @@ class LatentCryptoEnv(gym.Env):
         close_prices = future_ohlcv[:, :, -1, 3]  # (N, N_tgt)
 
         # Returns: ratio of close at target t vs target t-1
-        # For t=0, use the first target's close
         eps = 1e-8
-        # Compute returns between consecutive targets
         close_shifted = np.concatenate([
             close_prices[:, :1],  # anchor
             close_prices[:, :-1],
         ], axis=1)  # (N, N_tgt)
-        returns = (close_prices - close_shifted) / (np.abs(close_shifted) + eps)  # (N, N_tgt)
+        returns = (close_prices - close_shifted) / (np.abs(close_shifted) + eps)
 
         stats = []
         for t in range(N_tgt):
             r = returns[:, t]  # (N,)
             mean = r.mean()
             std = r.std() + eps
-            # Skewness: E[(X - mu)^3] / sigma^3
             skew = ((r - mean) ** 3).mean() / (std ** 3)
             stats.extend([mean, std, skew])
 

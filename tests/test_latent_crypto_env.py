@@ -1,5 +1,7 @@
 """Tests for Strate IV: AsymmetricReward, LatentCryptoEnv."""
 
+import math
+
 import numpy as np
 import pytest
 import torch
@@ -53,26 +55,24 @@ def make_buffer(n_entries: int = 5, **kwargs) -> TrajectoryBuffer:
 class TestAsymmetricReward:
     def test_zero_action_zero_reward(self):
         """Flat position → zero PnL, zero TC."""
-        r = AsymmetricReward(tc_rate=0.001)
+        r = AsymmetricReward(tc_rate=0.0005)
         reward, info = r.compute(
             action=0.0, prev_action=0.0,
             close_current=100.0, close_next=105.0,
-            sigma_close=0.02,
         )
         assert reward == 0.0
         assert info.raw_pnl == 0.0
         assert info.tc_penalty == 0.0
 
     def test_long_positive_return(self):
-        """Full long + positive return → positive reward."""
+        """Full long + positive return → positive reward (log return)."""
         r = AsymmetricReward(tc_rate=0.0)
         reward, info = r.compute(
             action=1.0, prev_action=1.0,
             close_current=100.0, close_next=105.0,
-            sigma_close=0.02,
         )
-        # return = 5/100 = 0.05, reward = 1.0 * 0.05 / 0.02 = 2.5
-        assert reward == pytest.approx(2.5, abs=1e-6)
+        expected = math.log(105.0 / 100.0)  # ~0.04879
+        assert reward == pytest.approx(expected, abs=1e-6)
         assert info.tc_penalty == 0.0
 
     def test_short_positive_return(self):
@@ -81,37 +81,36 @@ class TestAsymmetricReward:
         reward, info = r.compute(
             action=-1.0, prev_action=-1.0,
             close_current=100.0, close_next=105.0,
-            sigma_close=0.02,
         )
-        assert reward == pytest.approx(-2.5, abs=1e-6)
+        expected = -math.log(105.0 / 100.0)
+        assert reward == pytest.approx(expected, abs=1e-6)
 
     def test_transaction_cost(self):
         """Position change incurs TC penalty."""
-        r = AsymmetricReward(tc_rate=0.001)
+        r = AsymmetricReward(tc_rate=0.0005)
         reward, info = r.compute(
             action=1.0, prev_action=-1.0,
             close_current=100.0, close_next=100.0,
-            sigma_close=0.02,
         )
-        # return = 0, raw_pnl = 0, tc = 0.001 * |1 - (-1)| = 0.002
-        assert info.tc_penalty == pytest.approx(0.002, abs=1e-8)
-        assert reward == pytest.approx(-0.002, abs=1e-8)
+        # log_return = 0, raw_pnl = 0, tc = 0.0005 * |1 - (-1)| = 0.001
+        assert info.tc_penalty == pytest.approx(0.001, abs=1e-8)
+        assert reward == pytest.approx(-0.001, abs=1e-8)
 
-    def test_high_vol_dampens_reward(self):
-        """Higher sigma_close → smaller reward magnitude."""
+    def test_no_sigma_scaling(self):
+        """Reward is NOT divided by sigma_close anymore."""
         r = AsymmetricReward(tc_rate=0.0)
-        _, info_lo = r.compute(
+        rew_a, _ = r.compute(
             action=1.0, prev_action=1.0,
             close_current=100.0, close_next=105.0,
             sigma_close=0.01,
         )
-        _, info_hi = r.compute(
+        rew_b, _ = r.compute(
             action=1.0, prev_action=1.0,
             close_current=100.0, close_next=105.0,
             sigma_close=0.10,
         )
-        # Higher vol → lower raw PnL
-        assert abs(info_lo.raw_pnl) > abs(info_hi.raw_pnl)
+        # Sigma is ignored — both should be identical
+        assert rew_a == pytest.approx(rew_b, abs=1e-8)
 
 
 # ---------------------------------------------------------------------------
@@ -122,12 +121,12 @@ class TestLatentCryptoEnv:
     @pytest.fixture
     def env(self):
         buf = make_buffer(n_entries=10)
-        config = EnvConfig(obs_dim=415, n_tgt=8, tc_rate=0.001, patch_len=16)
+        config = EnvConfig(obs_dim=416, n_tgt=8, tc_rate=0.0005, patch_len=16)
         return LatentCryptoEnv(buffer=buf, config=config)
 
     def test_reset_returns_valid_obs(self, env):
         obs, info = env.reset(seed=42)
-        assert obs.shape == (415,)
+        assert obs.shape == (416,)
         assert obs.dtype == np.float32
         assert np.all(np.isfinite(obs))
         assert "realized_future_idx" in info
@@ -136,7 +135,7 @@ class TestLatentCryptoEnv:
         env.reset(seed=42)
         action = np.array([0.5], dtype=np.float32)
         obs, reward, terminated, truncated, info = env.step(action)
-        assert obs.shape == (415,)
+        assert obs.shape == (416,)
         assert isinstance(reward, float)
         assert not terminated  # First step, not done yet
         assert not truncated
@@ -198,10 +197,18 @@ class TestLatentCryptoEnv:
         """Environment should handle multiple resets without issues."""
         for _ in range(5):
             obs, info = env.reset()
-            assert obs.shape == (415,)
+            assert obs.shape == (416,)
             action = np.array([0.0], dtype=np.float32)
             obs, _, _, _, _ = env.step(action)
-            assert obs.shape == (415,)
+            assert obs.shape == (416,)
+
+    def test_delta_mu_in_observation(self, env):
+        """delta_mu should be present and finite in observation."""
+        obs, _ = env.reset(seed=42)
+        # delta_mu is at index 414 (after h_x 128 + mean 128 + std 128 + stats 24 + stds 5 = 413)
+        delta_mu_idx = 128 + 128 + 128 + 24 + 5  # = 413
+        delta_mu = obs[delta_mu_idx]
+        assert np.isfinite(delta_mu)
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +253,7 @@ class TestGymnasiumCompat:
         from gymnasium.utils.env_checker import check_env
 
         buf = make_buffer(n_entries=5)
-        config = EnvConfig(obs_dim=415, n_tgt=8, tc_rate=0.001, patch_len=16)
+        config = EnvConfig(obs_dim=416, n_tgt=8, tc_rate=0.0005, patch_len=16)
         env = LatentCryptoEnv(buffer=buf, config=config)
         # check_env raises on failure
         check_env(env, skip_render_check=True)
@@ -261,9 +268,9 @@ class TestConfig:
         """Config loads from YAML correctly."""
         yaml_content = """
 env:
-  obs_dim: 415
+  obs_dim: 416
   n_tgt: 8
-  tc_rate: 0.001
+  tc_rate: 0.0005
   patch_len: 16
 buffer:
   buffer_dir: "data/trajectory_buffer/"
@@ -291,6 +298,7 @@ ppo:
         cfg_file.write_text(yaml_content)
         config = load_config(str(cfg_file))
         assert isinstance(config, StrateIVConfig)
-        assert config.env.obs_dim == 415
+        assert config.env.obs_dim == 416
+        assert config.env.tc_rate == pytest.approx(0.0005)
         assert config.ppo.lr == pytest.approx(3e-4)
         assert config.buffer.n_episodes == 255
