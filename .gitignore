@@ -22,7 +22,9 @@ data/processed/
 *~
 outputs/
 data/trajectory_buffer/
+data/trajectory_buffer_v4/
 checkpoints/
+!checkpoints/strate_iv/vecnormalize.pkl
 logs_*.log
 .pytest_cache/
 infra/.terraform/

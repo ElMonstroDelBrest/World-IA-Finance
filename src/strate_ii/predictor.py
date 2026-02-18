@@ -68,8 +68,8 @@ class Predictor(nn.Module):
         B = h_x.shape[0]
         N_tgt = target_positions.shape[1]
 
-        # Mean-pool the context representation
-        ctx_mean = h_x.mean(dim=1, keepdim=True)  # (B, 1, d_model)
+        # Use last hidden state (causally richest) instead of mean-pool
+        ctx_mean = h_x[:, -1:, :]  # (B, 1, d_model)
 
         # Get positional embeddings for target positions
         pos = self.pos_embed(target_positions)  # (B, N_tgt, d_model)

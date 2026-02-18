@@ -54,11 +54,11 @@ training:
   weight_decay: 0.05        # Higher WD for bigger model (GPT-style)
   max_epochs: 300
   warmup_epochs: 30
-  batch_size: 32           # 512 for full dataset, 32 for dev subset (245 tokens)
+  batch_size: 128          # v5: ~3000 sequences, 128 = ~23 steps/epoch
   precision: 'bf16-mixed'   # H100 native bf16 Tensor Cores
 
 data:
-  token_dir: 'data/tokens/'
-  val_split: 0.1            # More data → less val needed
+  token_dir: 'data/tokens_v5/'
+  val_split: 0.05           # v5: more data → less val needed
   num_workers: 16            # a3-highgpu-1g has 26 vCPUs
   prefetch_factor: 4         # Pre-load 4 batches per worker

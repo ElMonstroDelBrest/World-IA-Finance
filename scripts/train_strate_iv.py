@@ -134,11 +134,16 @@ def train(args: argparse.Namespace) -> None:
     from stable_baselines3.common.callbacks import (
         BaseCallback, CallbackList, CheckpointCallback, EvalCallback,
     )
-    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+    from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
-    # Wrap environments with VecNormalize for observation normalization
-    # Critical: JEPA latents have norms of ~50M, MLP policy can't learn without normalization
-    train_env = DummyVecEnv([lambda: LatentCryptoEnv(buffer=train_buffer, config=config.env)])
+    # Use SubprocVecEnv for parallel rollouts (exploits multi-core CPU)
+    n_envs = args.n_envs if hasattr(args, "n_envs") and args.n_envs else 8
+    print(f"  Using {n_envs} parallel environments (SubprocVecEnv)")
+
+    train_env = SubprocVecEnv([
+        lambda i=i: LatentCryptoEnv(buffer=train_buffer, config=config.env)
+        for i in range(n_envs)
+    ])
     train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=10.0)
 
     eval_env = DummyVecEnv([lambda: LatentCryptoEnv(buffer=eval_buffer, config=config.env)])
@@ -154,7 +159,8 @@ def train(args: argparse.Namespace) -> None:
 
     # Auto-resume: check for existing model + VecNormalize stats
     last_model_path = checkpoint_dir / "ppo_strate_iv_last.zip"
-    vecnorm_path = checkpoint_dir / "vecnormalize.pkl"
+    vecnorm_path = checkpoint_dir / "vecnormalize_v4.pkl"
+    best_vecnorm_path = best_model_dir / "vecnormalize.pkl"
     resuming = last_model_path.exists() and not args.no_resume
 
     if resuming:
@@ -179,6 +185,9 @@ def train(args: argparse.Namespace) -> None:
             max_grad_norm=config.ppo.max_grad_norm,
             verbose=1,
             tensorboard_log=str(log_dir),
+            policy_kwargs=dict(
+                net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),
+            ),
         )
 
     # Sync eval env normalization stats from training env
@@ -206,6 +215,7 @@ def train(args: argparse.Namespace) -> None:
 
         def __init__(self) -> None:
             super().__init__()
+            self._last_best = None
 
         def _on_step(self) -> bool:
             eval_env.obs_rms = train_env.obs_rms
@@ -214,6 +224,14 @@ def train(args: argparse.Namespace) -> None:
 
         def _on_rollout_end(self) -> None:
             train_env.save(str(vecnorm_path))
+            # Also save alongside best_model whenever it's updated
+            best_zip = best_model_dir / "best_model.zip"
+            if best_zip.exists():
+                mtime = best_zip.stat().st_mtime
+                if mtime != self._last_best:
+                    self._last_best = mtime
+                    train_env.save(str(best_vecnorm_path))
+                    print(f"  VecNormalize saved to {best_vecnorm_path}")
 
     sync_callback = VecNormalizeSyncCallback()
     callbacks = CallbackList([checkpoint_callback, eval_callback, sync_callback])
@@ -236,9 +254,11 @@ def train(args: argparse.Namespace) -> None:
     model.save(str(final_path))
     model.save(str(last_model_path))
     train_env.save(str(vecnorm_path))
+    train_env.save(str(best_vecnorm_path))
     print(f"Final model saved to {final_path}")
     print(f"Last model saved to {last_model_path}")
     print(f"VecNormalize stats saved to {vecnorm_path}")
+    print(f"VecNormalize also saved to {best_vecnorm_path}")
     print(f"Best model (by eval reward) saved to {best_model_dir}")
 
 
@@ -253,6 +273,8 @@ def main() -> None:
                         help="Override total_timesteps from config")
     parser.add_argument("--no_resume", action="store_true",
                         help="Force fresh start, ignore existing checkpoints")
+    parser.add_argument("--n_envs", type=int, default=8,
+                        help="Number of parallel environments (SubprocVecEnv workers)")
 
     args = parser.parse_args()
 

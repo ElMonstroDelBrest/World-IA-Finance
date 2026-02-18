@@ -182,8 +182,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Strate IV demo visualization")
     parser.add_argument("--model_path", type=str,
                         default="tb_logs/strate_iv/best_model/best_model.zip")
-    parser.add_argument("--buffer_dir", type=str,
-                        default="data/trajectory_buffer/")
+    parser.add_argument("--buffer_dir", type=str, default=None,
+                        help="Override buffer dir (default: from config)")
     parser.add_argument("--config", type=str, default="configs/strate_iv.yaml")
     parser.add_argument("--output", type=str, default="outputs/strate_iv_demo.png")
     parser.add_argument("--seed", type=int, default=None)
@@ -193,14 +193,14 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    buffer = TrajectoryBuffer(args.buffer_dir)
+    buffer_dir = args.buffer_dir or config.buffer.buffer_dir
+    buffer = TrajectoryBuffer(buffer_dir)
     _, eval_buffer = buffer.split(val_ratio=config.buffer.val_ratio)
     print(f"Eval buffer: {len(eval_buffer)} episodes")
 
-    # Try to load VecNormalize stats if available
-    vecnorm_path = os.path.join(
-        os.path.dirname(args.model_path), "..", "checkpoints", "vecnormalize.pkl"
-    )
+    # Try to load VecNormalize stats alongside the model
+    model_dir = os.path.dirname(args.model_path)
+    vecnorm_path = os.path.join(model_dir, "vecnormalize.pkl")
 
     if os.path.exists(vecnorm_path):
         vec_env = DummyVecEnv([lambda: LatentCryptoEnv(buffer=eval_buffer, config=config.env)])

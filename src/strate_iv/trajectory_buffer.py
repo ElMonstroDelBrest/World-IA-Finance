@@ -270,7 +270,7 @@ class TrajectoryPrecomputer:
 
         # Extract context encoder representation
         h_x = self.jepa.context_encoder(tokens_b, weekend_mask=wm_b)  # (1, S, d_model)
-        h_x_pooled = h_x.mean(dim=1).squeeze(0)  # (d_model,)
+        h_x_pooled = h_x[:, -1, :].squeeze(0)  # (d_model,)
 
         # RevIN stats
         means, stds = self.generator._estimate_context_stats(ohlcv_b)

@@ -1,5 +1,14 @@
 # Financial-IA: Latent Market Intelligence
 
+> **⚠️ DISCLAIMER: EDUCATIONAL PURPOSE ONLY**
+>
+> This software is a research project exploring the application of Deep Learning (JEPA, VQ-VAE, PPO) to financial time series. **It is NOT a trading bot ready for production use.**
+>
+> - Nothing in this repository constitutes financial advice.
+> - Past performance (simulated or real) is not indicative of future results.
+> - The authors are not responsible for any financial losses incurred by using this code.
+> - Use at your own risk and strictly within the legal frameworks of your jurisdiction.
+
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ElMonstroDelBrest/World-IA-Finance/blob/main/demo.ipynb)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)

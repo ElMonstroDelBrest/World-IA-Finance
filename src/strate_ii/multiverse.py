@@ -116,15 +116,20 @@ class MultiverseGenerator:
             stds: (B, 1, 5) per-channel std of log-returns.
         """
         eps = 1e-8
+        # Use only the last 64 candles (4 patches) for stats — more representative
+        # of the current regime than the full context (~2048 candles)
+        recent_window = min(64, context_ohlcv.shape[1])
+        recent_ohlcv = context_ohlcv[:, -recent_window:, :]
+
         # Compute log-returns for OHLC channels (0-3)
-        prices = context_ohlcv[:, :, :4].clamp(min=eps)  # (B, T, 4)
-        log_returns_ohlc = torch.log(prices[:, 1:] / prices[:, :-1])  # (B, T-1, 4)
+        prices = recent_ohlcv[:, :, :4].clamp(min=eps)  # (B, W, 4)
+        log_returns_ohlc = torch.log(prices[:, 1:] / prices[:, :-1])  # (B, W-1, 4)
 
         # Compute log1p for volume channel (4)
-        volume = context_ohlcv[:, :, 4:5].clamp(min=0)  # (B, T, 1)
+        volume = recent_ohlcv[:, :, 4:5].clamp(min=0)  # (B, W, 1)
         # Use diff of log1p(volume) as "log-return" proxy for volume
         log_vol = torch.log1p(volume)
-        log_returns_vol = log_vol[:, 1:] - log_vol[:, :-1]  # (B, T-1, 1)
+        log_returns_vol = log_vol[:, 1:] - log_vol[:, :-1]  # (B, W-1, 1)
 
         log_returns = torch.cat([log_returns_ohlc, log_returns_vol], dim=-1)  # (B, T-1, 5)
 

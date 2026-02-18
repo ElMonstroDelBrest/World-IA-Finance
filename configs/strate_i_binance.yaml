@@ -6,8 +6,8 @@ codebook:
   latent_dim: 64
   num_codes: 1024
 data:
-  data_path: data/binance_1h_subset/
-  num_workers: 4
+  data_path: data/ohlcv_v5/
+  num_workers: 16
   val_split: 0.2
 decoder:
   hidden_channels: 128
@@ -36,9 +36,9 @@ revin:
   affine: false
   eps: 1.0e-05
 training:
-  batch_size: 128
+  batch_size: 512
   lr: 0.0003
-  max_epochs: 10
+  max_epochs: 30
   num_patches: 32
   patience: 5
   precision: bf16-mixed

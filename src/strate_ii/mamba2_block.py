@@ -1,7 +1,7 @@
 """Mamba-2 block with selective scan and weekend gating.
 
-Custom pure-PyTorch implementation (no mamba-ssm dependency).
-Sequences are short (~64 tokens) so sequential scan is sufficient.
+Uses fused CUDA kernels from mamba-ssm when available, falls back to
+pure-PyTorch sequential scan otherwise.
 
 Weekend gating: delta *= (1 - is_weekend)
   When weekend: delta=0 → exp(A*0)=I → h_t = h_{t-1} (state frozen).
@@ -13,19 +13,201 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+# Try to import fused selective scan kernel
+try:
+    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+    HAS_FUSED_SCAN = True
+except ImportError:
+    HAS_FUSED_SCAN = False
+
+# Try to import fused causal conv1d kernel
+try:
+    from causal_conv1d import causal_conv1d_fn
+    HAS_FUSED_CONV = True
+except ImportError:
+    HAS_FUSED_CONV = False
+
 
 class CausalConv1d(nn.Module):
     """Causal 1D convolution with left padding."""
 
     def __init__(self, d_inner: int, kernel_size: int = 4):
         super().__init__()
+        self.d_inner = d_inner
+        self.kernel_size = kernel_size
         self.pad = kernel_size - 1
         self.conv = nn.Conv1d(d_inner, d_inner, kernel_size, groups=d_inner)
 
     def forward(self, x: Tensor) -> Tensor:
         """(B, D, L) -> (B, D, L)."""
+        if HAS_FUSED_CONV:
+            # causal_conv1d_fn expects (B, D, L) and weight (D, kernel_size)
+            return causal_conv1d_fn(
+                x=x,
+                weight=self.conv.weight.squeeze(1),  # (D, 1, K) -> (D, K)
+                bias=self.conv.bias,
+            )
         x = F.pad(x, (self.pad, 0))
         return self.conv(x)
+
+
+def selective_scan_slow(
+    x: Tensor,
+    dt: Tensor,
+    A: Tensor,
+    B: Tensor,
+    C: Tensor,
+    weekend_mask: Tensor | None = None,
+) -> Tensor:
+    """Pure-PyTorch sequential selective scan (fallback)."""
+    B_batch, L, D_inner = x.shape
+    n_heads = A.shape[0]
+    d_state = A.shape[1]
+    head_dim = D_inner // n_heads
+
+    x_heads = x.view(B_batch, L, n_heads, head_dim)
+    dt = F.softplus(dt)
+
+    if weekend_mask is not None:
+        gate = 1.0 - weekend_mask.unsqueeze(-1)
+        dt = dt * gate
+
+    h = torch.zeros(B_batch, n_heads, d_state, head_dim, device=x.device, dtype=x.dtype)
+    outputs = []
+
+    for t in range(L):
+        dt_t = dt[:, t, :]
+        B_t = B[:, t, :, :]
+        C_t = C[:, t, :, :]
+        x_t = x_heads[:, t, :, :]
+
+        A_bar = torch.exp(A.unsqueeze(0) * dt_t.unsqueeze(-1))
+        B_bar = dt_t.unsqueeze(-1) * B_t
+
+        h = A_bar.unsqueeze(-1) * h + B_bar.unsqueeze(-1) * x_t.unsqueeze(2)
+        y_t = torch.einsum("bns,bnsd->bnd", C_t, h)
+        outputs.append(y_t)
+
+    y = torch.stack(outputs, dim=1)
+    y = y.reshape(B_batch, L, D_inner)
+    return y
+
+
+def selective_scan_fused(
+    x: Tensor,
+    dt: Tensor,
+    A: Tensor,
+    B: Tensor,
+    C: Tensor,
+    weekend_mask: Tensor | None = None,
+) -> Tensor:
+    """Fused CUDA selective scan from mamba-ssm.
+
+    mamba-ssm selective_scan_fn expects:
+        u:     (B, D, L)        input
+        delta: (B, D, L)        time step (post-softplus)
+        A:     (D, N)           SSM state matrix
+        B:     (B, N, L)        input matrix
+        C:     (B, N, L)        output matrix
+        D:     (D,) or None     skip connection
+        z:     (B, D, L) or None  gate
+
+    Our shapes:
+        x:  (B, L, D_inner)
+        dt: (B, L, n_heads) — needs expanding to D_inner
+        A:  (n_heads, d_state) — needs expanding to D_inner
+        B:  (B, L, n_heads, d_state) — needs reshaping
+        C:  (B, L, n_heads, d_state) — needs reshaping
+    """
+    B_batch, L, D_inner = x.shape
+    n_heads = A.shape[0]
+    d_state = A.shape[1]
+    head_dim = D_inner // n_heads
+
+    # Apply softplus to dt
+    dt = F.softplus(dt)  # (B, L, n_heads)
+
+    # Weekend gating: zero out delta on weekends
+    if weekend_mask is not None:
+        gate = 1.0 - weekend_mask.unsqueeze(-1)  # (B, L, 1)
+        dt = dt * gate
+
+    # Expand dt from (B, L, n_heads) to (B, L, D_inner) by repeating per head
+    dt = dt.unsqueeze(-1).expand(-1, -1, -1, head_dim).reshape(B_batch, L, D_inner)
+
+    # Expand A from (n_heads, d_state) to (D_inner, d_state)
+    A_expanded = A.unsqueeze(1).expand(-1, head_dim, -1).reshape(D_inner, d_state)
+
+    # Reshape B, C from (B, L, n_heads, d_state) to (B, d_state, L)
+    # For multi-head: we need to handle heads. selective_scan_fn treats D independently,
+    # so expanding B/C per head works since each head-dim uses the same B/C for that head.
+    # B: (B, L, n_heads, d_state) -> expand to (B, L, D_inner, d_state) isn't right...
+    # Actually selective_scan_fn expects B: (B, N, L) where N=d_state, applied uniformly to all D.
+    # But we have per-head B. We need to run per-head or flatten.
+
+    # Per-head approach: reshape everything to treat heads as batch dim
+    # x: (B, L, n_heads, head_dim) -> (B*n_heads, head_dim, L)
+    x_heads = x.view(B_batch, L, n_heads, head_dim).permute(0, 2, 3, 1)  # (B, H, hd, L)
+    x_flat = x_heads.reshape(B_batch * n_heads, head_dim, L)
+
+    # dt: (B, L, n_heads) -> (B, H, L) -> (B*H, head_dim_repeated, L)
+    dt_heads = dt.view(B_batch, L, n_heads, head_dim).permute(0, 2, 3, 1)
+    dt_flat = dt_heads.reshape(B_batch * n_heads, head_dim, L)
+
+    # A: (n_heads, d_state) -> repeat for each batch -> (B*H, head_dim, d_state)
+    # selective_scan_fn expects A: (D, N) where D=head_dim
+    A_per_head = A.unsqueeze(1).expand(-1, head_dim, -1)  # (H, hd, N)
+
+    # B: (B, L, H, N) -> (B, H, N, L) -> (B*H, N, L)
+    B_flat = B.permute(0, 2, 3, 1).reshape(B_batch * n_heads, d_state, L)
+
+    # C: (B, L, H, N) -> (B, H, N, L) -> (B*H, N, L)
+    C_flat = C.permute(0, 2, 3, 1).reshape(B_batch * n_heads, d_state, L)
+
+    # Run fused scan for ALL heads in a single kernel call.
+    # selective_scan_fn broadcasts A: (D, N) over the batch dimension.
+    # We have B*H batches with x_flat already interleaved as [b0h0, b0h1, ..., b1h0, ...].
+    # Reorder so consecutive batch entries share the same A (group by head):
+    #   x_flat: (B*H, hd, L) interleaved → (H, B, hd, L) → (H*B, hd, L)
+    # Then run per-head with contiguous batches (single kernel, no Python loop).
+
+    # Reorder from interleaved (b0h0,b0h1,...,b1h0,...) to grouped (h0b0,h0b1,...,h1b0,...)
+    x_grouped = x_flat.view(B_batch, n_heads, head_dim, L).permute(1, 0, 2, 3).reshape(n_heads * B_batch, head_dim, L)
+    dt_grouped = dt_flat.view(B_batch, n_heads, head_dim, L).permute(1, 0, 2, 3).reshape(n_heads * B_batch, head_dim, L)
+    B_grouped = B_flat.view(B_batch, n_heads, d_state, L).permute(1, 0, 2, 3).reshape(n_heads * B_batch, d_state, L)
+    C_grouped = C_flat.view(B_batch, n_heads, d_state, L).permute(1, 0, 2, 3).reshape(n_heads * B_batch, d_state, L)
+
+    # A_per_head: (H, hd, N) → tile each head's A for B batches → (H*B, hd, N)
+    # selective_scan_fn expects A: (D, N) broadcast over batch, but with grouped layout
+    # each contiguous block of B entries uses the same A[h].
+    # We must tile: (H, hd, N) → (H, 1, hd, N) → (H, B, hd, N) → (H*B, hd, N)
+    A_tiled = A_per_head.unsqueeze(1).expand(-1, B_batch, -1, -1).reshape(n_heads * B_batch, head_dim, d_state)
+
+    # Single fused kernel call with H*B batches
+    # NOTE: selective_scan_fn expects A: (D, N) not (B, D, N).
+    # It broadcasts A over batch. Since different batches need different A (per-head),
+    # we split into n_heads calls but with contiguous B-sized batches (no striding).
+    outputs = []
+    for h in range(n_heads):
+        start = h * B_batch
+        end = start + B_batch
+        y_h = selective_scan_fn(
+            x_grouped[start:end],        # (B, hd, L) — contiguous
+            dt_grouped[start:end],       # (B, hd, L)
+            A_per_head[h],               # (hd, N)
+            B_grouped[start:end],        # (B, N, L)
+            C_grouped[start:end],        # (B, N, L)
+            D=None,
+            z=None,
+            delta_softplus=False,        # already applied
+            return_last_state=False,
+        )
+        outputs.append(y_h)  # (B, hd, L)
+
+    # Stack heads: (H, B, hd, L) → (B, H, hd, L) → (B, L, D_inner)
+    y = torch.stack(outputs, dim=0)  # (H, B, hd, L)
+    y = y.permute(1, 3, 0, 2).reshape(B_batch, L, D_inner)
+    return y
 
 
 def selective_scan(
@@ -36,66 +218,10 @@ def selective_scan(
     C: Tensor,
     weekend_mask: Tensor | None = None,
 ) -> Tensor:
-    """Sequential selective scan with weekend gating.
-
-    Args:
-        x: (B, L, D_inner) input after conv+activation.
-        dt: (B, L, n_heads) delta (time step) logits, pre-softplus.
-        A: (n_heads, d_state) diagonal SSM matrix (log-space, negative).
-        B: (B, L, n_heads, d_state) input-dependent SSM input matrix.
-        C: (B, L, n_heads, d_state) input-dependent SSM output matrix.
-        weekend_mask: (B, L) float {0.0, 1.0} where 1.0 = weekend.
-
-    Returns:
-        y: (B, L, D_inner) scan output.
-    """
-    B_batch, L, D_inner = x.shape
-    n_heads = A.shape[0]
-    d_state = A.shape[1]
-    head_dim = D_inner // n_heads
-
-    # Reshape x into heads: (B, L, n_heads, head_dim)
-    x_heads = x.view(B_batch, L, n_heads, head_dim)
-
-    # Apply softplus to dt logits
-    dt = F.softplus(dt)  # (B, L, n_heads)
-
-    # Weekend gating: zero out delta on weekends
-    if weekend_mask is not None:
-        # weekend_mask: (B, L) → (B, L, 1)
-        gate = 1.0 - weekend_mask.unsqueeze(-1)
-        dt = dt * gate
-
-    # Initialize hidden state: (B, n_heads, d_state, head_dim)
-    h = torch.zeros(B_batch, n_heads, d_state, head_dim, device=x.device, dtype=x.dtype)
-    outputs = []
-
-    for t in range(L):
-        dt_t = dt[:, t, :]  # (B, n_heads)
-        B_t = B[:, t, :, :]  # (B, n_heads, d_state)
-        C_t = C[:, t, :, :]  # (B, n_heads, d_state)
-        x_t = x_heads[:, t, :, :]  # (B, n_heads, head_dim)
-
-        # Discretize: A_bar = exp(A * dt), B_bar = dt * B
-        # A is (n_heads, d_state), dt_t is (B, n_heads)
-        A_bar = torch.exp(A.unsqueeze(0) * dt_t.unsqueeze(-1))  # (B, n_heads, d_state)
-        B_bar = dt_t.unsqueeze(-1) * B_t  # (B, n_heads, d_state)
-
-        # State update: h_t = A_bar * h_{t-1} + B_bar * x_t
-        # h: (B, n_heads, d_state, head_dim)
-        # A_bar: (B, n_heads, d_state) → unsqueeze for head_dim
-        # B_bar: (B, n_heads, d_state) → outer product with x_t
-        h = A_bar.unsqueeze(-1) * h + B_bar.unsqueeze(-1) * x_t.unsqueeze(2)
-
-        # Output: y_t = C_t @ h_t
-        # C_t: (B, n_heads, d_state), h: (B, n_heads, d_state, head_dim)
-        y_t = torch.einsum("bns,bnsd->bnd", C_t, h)  # (B, n_heads, head_dim)
-        outputs.append(y_t)
-
-    # Stack and reshape: (B, L, n_heads, head_dim) → (B, L, D_inner)
-    y = torch.stack(outputs, dim=1)
-    y = y.reshape(B_batch, L, D_inner)
-    return y
+    """Selective scan with automatic backend selection."""
+    if HAS_FUSED_SCAN and x.is_cuda:
+        return selective_scan_fused(x, dt, A, B, C, weekend_mask)
+    return selective_scan_slow(x, dt, A, B, C, weekend_mask)
 
 
 class Mamba2Block(nn.Module):

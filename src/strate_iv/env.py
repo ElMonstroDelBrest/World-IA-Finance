@@ -61,11 +61,14 @@ class LatentCryptoEnv(gym.Env):
         self._position: float = 0.0
         self._cumulative_pnl: float = 0.0
 
-        # Auto-detect obs_dim from a sample entry
-        obs_dim = 3 * 128 + self.config.n_tgt * 3 + 5 + 3  # fallback
-        if len(buffer) > 0:
-            sample_obs = self._build_observation_from(buffer.entries[0])
-            obs_dim = sample_obs.shape[0]
+        # Auto-detect obs_dim from buffer (no hardcoded fallback)
+        if len(buffer) == 0:
+            raise ValueError(
+                "TrajectoryBuffer is empty — cannot auto-detect obs_dim. "
+                "Run precompute_trajectories.py first."
+            )
+        sample_obs = self._build_observation_from(buffer.entries[0])
+        obs_dim = sample_obs.shape[0]
 
         self.observation_space = spaces.Box(
             low=-np.inf,

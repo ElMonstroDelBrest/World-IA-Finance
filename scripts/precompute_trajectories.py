@@ -428,7 +428,7 @@ def precompute_historical(args):
             tokens_b = token_indices.unsqueeze(0)  # (1, S)
             wm_b = weekend_mask.unsqueeze(0) if weekend_mask is not None else None
             h_x = jepa.context_encoder(tokens_b, weekend_mask=wm_b)  # (1, S, d_model)
-            h_x_pooled = h_x.mean(dim=1).squeeze(0)  # (d_model,)
+            h_x_pooled = h_x[:, -1, :].squeeze(0)  # (d_model,)
 
             # Tokenize future patches → encode through JEPA target encoder
             # Include last context candle as anchor for the first log return

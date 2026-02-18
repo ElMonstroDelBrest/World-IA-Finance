@@ -83,6 +83,11 @@ pip install -q \
     gymnasium>=1.0 \
     stable-baselines3>=2.0
 
+# Mamba-2 fused CUDA kernels (critical for Strate II perf)
+pip install -q \
+    mamba-ssm>=2.2 \
+    causal-conv1d>=1.4
+
 # GCP deps
 pip install -q \
     google-cloud-storage>=2.0 \
